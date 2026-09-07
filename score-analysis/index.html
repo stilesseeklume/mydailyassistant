@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Seeklume · 成绩分析（试用）</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  :root { --bg:#f5f5f7; --surface:#fff; --border:#e5e5ea; --text:#1d1d1f; --text-2:#6e6e73; --accent:#0071e3; --warn:#fff4d6; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; padding:32px 24px; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; }
+  h1 { font-size:clamp(22px,4vw,30px); letter-spacing:-.4px; margin:0 0 6px; }
+  .eyebrow { color:var(--accent); font-size:11px; font-weight:700; letter-spacing:2px; text-transform:uppercase; }
+  .privacy { margin:14px 0 22px; padding:10px 14px; border:1px solid var(--border); border-radius:10px;
+    background:var(--surface); color:var(--text-2); font-size:13px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:20px; margin-bottom:18px; }
+  .card h2 { font-size:15px; margin:0 0 12px; }
+  label.file, button { display:inline-flex; align-items:center; justify-content:center; min-height:40px; padding:0 18px;
+    border-radius:999px; border:1px solid var(--border); background:var(--surface); color:var(--text);
+    font-size:14px; font-weight:600; cursor:pointer; }
+  button.primary { border-color:var(--accent); background:var(--accent); color:#fff; }
+  button:disabled { opacity:.45; cursor:default; }
+  input[type=file] { display:none; }
+  textarea { width:100%; min-height:84px; border:1px solid var(--border); border-radius:10px; padding:10px; font:13px/1.6 inherit; resize:vertical; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .note { font-size:13px; color:var(--text-2); margin-top:8px; }
+  .err { color:#c0392b; }
+  .table-scroll { overflow:auto; border:1px solid var(--border); border-radius:12px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; white-space:nowrap; }
+  th, td { padding:7px 10px; border-bottom:1px solid var(--border); text-align:center; }
+  th { position:sticky; top:0; background:#fafafa; font-weight:600; }
+  td:first-child, th:first-child { text-align:left; }
+  tr.warn td { background:var(--warn); }
+  a.back { color:var(--accent); text-decoration:none; font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Trial · 本地工具</div>
+  <h1>成绩分析 · 成绩单转换</h1>
+  <div class="privacy">🔒 数据仅在本地浏览器处理，不上传、不保存到服务器。关闭页面即清空。</div>
+
+  <div class="card">
+    <h2>① 导入成绩单</h2>
+    <div class="row">
+      <label class="file" for="fileInput">选择 / 拖入 xls 文件</label>
+      <span id="fileName" class="note"></span>
+    </div>
+    <input id="fileInput" type="file" accept=".xls,.xlsx">
+    <div id="scopeNote" class="note"></div>
+    <div id="errBox" class="note err"></div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <h2>② 逐生转换表</h2>
+    <div class="row" style="margin-bottom:12px;">
+      <button id="copyBtn" class="primary" type="button" disabled>复制到剪贴板</button>
+      <button id="exportBtn" type="button" disabled>导出 Excel</button>
+      <span id="copyNote" class="note"></span>
+    </div>
+    <div class="table-scroll"><table id="resultTable"></table></div>
+  </div>
+
+  <p><a class="back" href="../">← 返回首页</a></p>
+</div>
+
+<script type="module">
+// 听说板块暂封：parseSpeakingInput / mergeSpeaking 留在模块里，后续听说出表后再接。
+import { detectSections, parseExamScores, buildStudentRows, toTable, toTSV }
+  from './score-convert.js';
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let state = { detection: null, rows: null, examMap: {}, table: null };
+
+function findSheet(wb, keyword) {
+  const name = wb.SheetNames.find(n => n.includes(keyword));
+  return name ? XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: '' }) : null;
+}
+
+function setError(msg) { $('errBox').textContent = msg || ''; }
+
+function render() {
+  const hasSpeaking = state.rows.some(r => r.total150 != null);
+  state.table = toTable(state.rows, state.detection, { hasSpeaking });
+  const t = state.table;
+  let html = '<thead><tr>' + t.columns.map(c => '<th>' + c + '</th>').join('') + '</tr></thead><tbody>';
+  t.data.forEach((row, i) => {
+    const warn = state.rows[i].warn ? ' class="warn"' : '';
+    html += '<tr' + warn + '>' + row.map(v => '<td>' + (v === '' ? '' : esc(v)) + '</td>').join('') + '</tr>';
+  });
+  $('resultTable').innerHTML = html + '</tbody>';
+  $('copyBtn').disabled = false;
+  $('exportBtn').disabled = false;
+  $('resultCard').style.display = '';
+}
+
+async function handleFile(file) {
+  setError('');
+  $('fileName').textContent = file.name;
+  $('resultCard').style.display = 'none';
+  $('copyBtn').disabled = true;
+  $('exportBtn').disabled = true;
+  $('scopeNote').textContent = '';
+  $('copyNote').textContent = '';
+  state.rows = null; state.detection = null; state.table = null;
+  if (!window.XLSX) { setError('Excel 解析库未加载，请检查网络后刷新。'); return; }
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    const detail = findSheet(wb, '小题分');
+    if (!detail) { setError('没找到「学生小题分」工作表，请确认导出的是完整成绩单。'); return; }
+    const exam = findSheet(wb, '考生成绩');
+    state.detection = detectSections(detail[0], detail[1], detail.slice(2));
+    state.examMap = exam ? parseExamScores(exam[0], exam.slice(1)) : {};
+    state.rows = buildStudentRows(detail.slice(2), state.detection, state.examMap);
+    const warnCount = state.rows.filter(r => r.warn).length;
+    $('scopeNote').textContent = '识别为 ' + state.detection.scope + ' 分卷，共 ' + state.rows.length + ' 名学生'
+      + (warnCount ? '（' + warnCount + ' 行总分与板块之和不符，已标黄）' : '') + '。';
+    render();
+  } catch (e) {
+    setError('解析失败：' + e.message);
+  }
+}
+
+$('fileInput').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) handleFile(f); });
+['dragover', 'drop'].forEach(ev => document.body.addEventListener(ev, e => e.preventDefault()));
+document.body.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
+
+$('copyBtn').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(toTSV(state.table)); $('copyNote').textContent = '已复制，可直接粘贴到 Excel。'; }
+  catch (e) { $('copyNote').textContent = '复制失败，请手动选择表格。'; }
+});
+
+$('exportBtn').addEventListener('click', () => {
+  if (!state.table) return;
+  // 直接导出 .xlsx（兼容 WPS / Excel），用已加载的 SheetJS 生成，无需服务端。
+  const aoa = [state.table.columns, ...state.table.data];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '成绩分析');
+  XLSX.writeFile(wb, '成绩分析转换表.xlsx');
+});
+</script>
+</body>
+</html>
